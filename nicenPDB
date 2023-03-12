@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+##!/usr/bin/env python2
+
+# Charles Christoffer (christ35@purdue.edu)
+
+import sys
+import os
+from Bio.PDB import *
+from Bio import BiopythonWarning
+import warnings
+
+sys.path.append(os.path.expanduser("~christ35/bin"))
+sys.path.append(os.path.expanduser("~christ35/libraries"))
+
+should_erase_altloc = "--erase-altloc" in sys.argv
+should_erase_sidechains = "--erase-sidechains" in sys.argv
+
+class MySelect(Select):
+	def accept_atom(self, atom):
+		if should_erase_sidechains and atom.name not in ["CA", "C", "N", "O"]:
+			print("yo",file=sys.stderr)
+			return 0
+		
+		if atom.element == "H":
+			return 0
+		else:
+			if not should_erase_altloc:
+				return not atom.is_disordered() or atom.get_altloc() == 'A'
+			else:
+				if not atom.is_disordered() or atom.get_altloc() == 'A':
+					atom.set_altloc(' ')
+					return True
+
+silence = True
+
+if silence:
+	warnings.simplefilter('ignore', BiopythonWarning)
+
+
+parser = PDBParser()
+struct = parser.get_structure("stdin", sys.stdin)
+
+for r in struct.get_residues():
+	r.segid = ""
+
+for chain in struct.get_chains():
+	last_res = None
+	for r in chain:
+		last_res = r
+
+	if "OT1" in last_res:
+		#print list(last_res.get_atoms())
+		ot1 = last_res["OT1"]
+		last_res.detach_child("OT1")
+		ot1.id = "OXT"
+		ot1.fullname = " OXT"
+		last_res.add(ot1)
+		#print list(last_res.get_atoms())
+
+	if "OT2" in last_res:
+		#print list(last_res.get_atoms())
+		ot2 = last_res["OT2"]
+		last_res.detach_child("OT2")
+		ot2.id = "O"
+		ot2.fullname = " O  "
+		last_res.add(ot2)
+		#print list(last_res.get_atoms())
+
+	#print list(last_res.get_atoms())
+	chain.child_list = list(sorted(chain.child_list, key=lambda x: x.get_id()))
+	#chain.child_dict = list(sorted(chain.child_dict))
+
+for model in struct:
+	model.child_list = list(sorted(model.child_list,  key=lambda x: x.get_id()))
+
+#for atom in struct.get_atoms():
+#	if atom.get_id() in ["OT1", "OT2", "OXT"]:
+#		print atom.get_parent()
+#		print atom
+#
+#exit(1)
+pdbio = PDBIO()
+pdbio.set_structure(struct)
+pdbio.save(sys.stdout, MySelect())

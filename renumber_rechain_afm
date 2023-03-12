@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+# Charles Christoffer (christ35@purdue.edu)
+
+import sys
+import os
+import itertools
+from Bio.PDB import PDBParser
+from Bio.PDB import PDBIO
+from Bio.PDB import Superimposer
+from Bio.Data.SCOPData import protein_letters_3to1
+from Bio.SeqUtils import seq1
+from Bio import pairwise2
+from Bio.SubsMat import MatrixInfo
+from Bio import SeqIO
+
+import warnings
+from Bio import BiopythonWarning
+warnings.simplefilter('ignore', BiopythonWarning)
+
+warncount = 0
+errorcount = 0
+unknown_cids = set()
+
+parser = PDBParser(PERMISSIVE=False)
+pdbio = PDBIO()
+
+should_print_aln = False
+if "RENUM_PRINT_ALN" in os.environ:
+	should_print_aln = True
+
+should_delete_mismatched_residues = False
+if "RENUM_DELETE_MISMATCHES" in os.environ:
+	print("deleting mismatched residues", file=sys.stderr)
+	should_delete_mismatched_residues = True
+
+should_delete_mismatched_atoms = False
+if "RENUM_DELETE_MISMATCHES_ATOMS" in os.environ:
+	print("deleting mismatched atoms", file=sys.stderr)
+	should_delete_mismatched_atoms = True
+
+should_rename_residues = False
+if "RENUM_RENAME_RESIDUES" in os.environ:
+	print("renaming mismatched residues", file=sys.stderr)
+	should_rename_residues = True
+
+should_reassign_chains = False
+if "RENUM_REASSIGN_CHAINS" in os.environ:
+	print("reassigning chains", file=sys.stderr)
+	should_reassign_chains = True
+
+should_copy_bfactors = False
+if "RENUM_COPY_BFACTORS" in os.environ:
+	print("copying bfactors", file=sys.stderr)
+	should_copy_bfactors = True
+
+should_set_occupancy_1 = False
+if "RENUM_SET_OCCUPANCY_1" in os.environ:
+	print("setting occupancies to 1", file=sys.stderr)
+	should_set_occupancy_1 = True
+
+should_align_structure = False
+if "RENUM_ALIGN_STRUCTURE" in os.environ:
+	print("aligning structure into reference", file=sys.stderr)
+	should_align_structure = True
+
+should_use_other_matrix = False
+if "RENUM_USE_MATRIX" in os.environ:
+	print("using specified alignment scoring matrix", file=sys.stderr)
+	should_use_other_matrix = True
+	user_specified_scoring_matrix = os.environ["RENUM_USE_MATRIX"]
+
+should_keep_unknown_chains = False
+if "RENUM_KEEP_UNKNOWN_CHAINS" in os.environ:
+	print("keeping unknown chains", file=sys.stderr)
+	should_keep_unknown_chains = True
+
+# map nucleic acid seqs
+orig_seq1 = seq1
+def seq1(x):
+	if len(x.strip()) == 1:
+		return x.strip().lower()
+	elif len(x.strip()) == 2:
+		# handle 2letter nucleic
+		return x.strip().lower()[1]
+	return orig_seq1(x)
+
+refpath = sys.argv[1]
+
+#path1 = sys.argv[1]
+#path2 = sys.argv[2]
+
+#s1 = parser.get_structure(path1, path1)
+#s2 = parser.get_structure(path2, path2)
+
+#print s1
+#print s2
+
+struct = parser.get_structure(refpath, refpath)
+
+refstruct = struct
+
+chain2refseq = dict()
+chain2chain = dict()
+chain2refresiset = dict()
+
+from Bio.PDB import Select
+class NotHugeResi(Select):
+	def accept_atom(self, a):
+		if not should_delete_mismatched_atoms:
+			return True
+		r = a.get_parent()
+		c = r.get_parent()
+		
+		if c.get_id() in unknown_cids:
+			return True
+
+		if r.get_id()[1] >= 1000000:
+			return False	
+		elif a.get_name() not in refstruct[0][c.get_id()][r.get_id()]:
+			print("rejecting", a.get_full_id(), file=sys.stderr)
+			return False
+		return True
+	def accept_residue(self, r):
+		if r.get_parent().get_id() in unknown_cids:
+			return True
+		if should_rename_residues and r.get_id()[1] < 1000000:
+			c = r.get_parent()
+			ref_r = refstruct[0][c.get_id()][r.get_id()]
+			ref_name = ref_r.get_resname()
+			this_name = r.get_resname()
+			if this_name != ref_name:
+				r.resname = ref_name
+			
+		acc = r.get_id()[1] < 1000000
+#		if not acc:
+#			print("rejecting", r.get_full_id(),file=sys.stderr)
+		return acc
+
+for chain in struct.get_chains():
+	
+#	print("[info] current chain: %s" % chain.get_id())
+	# increment all resi by 2,000,000 to prevent collisions
+#	for r in chain.get_residues():
+#		iii = r.get_id()
+#		iii = list(iii)
+#		#iii[1] += 2000000
+#		iii = tuple(iii)
+#		r.id = iii
+#
+	seq = "".join([seq1(r.resname) for r in chain.get_residues() if r.get_id()[0]==" "])
+	chain2refseq[chain.get_id()] = seq
+	chain2refresiset[chain.get_id()] = set((chain.get_id(), r.get_resname(), r.get_id()) for r in chain.get_residues() if r.get_id()[0]==" ")
+	chain2chain[chain.get_id()] = chain
+
+#for record in SeqIO.parse(refpath, "fasta"):
+#	chainid = record.name.split("|")[0].split(":")[-1]
+#	chainseq = str(record.upper().seq)
+#	chain2refseq[chainid] = chainseq
+
+#print chain2refseq
+
+#refseq = SeqIO.read(refpath, "fasta").seq.upper()
+#q1 = "".join([seq1(r.resname) for r in s1.get_residues()])
+#q2 = "".join([seq1(r.resname) for r in s2.get_residues()])
+
+matrix = dict(MatrixInfo.blosum100)
+# add nucleic acid residues
+for a, b in itertools.combinations_with_replacement('gactu', 2):
+	matrix[(a,b)] = 10 if a == b else -10
+
+for a, b in itertools.product('gactu', "GALMFWKQESPVICYHRNDTX"):
+	matrix[(a,b)] = 10 if a == b else -10
+
+for a, b in itertools.product("GALMFWKQESPVICYHRNDTX", 'gactu'):
+	matrix[(a,b)] = 10 if a == b else -10
+
+if should_use_other_matrix:
+	matrix = getattr(MatrixInfo, user_specified_scoring_matrix)
+gap_open = -10
+gap_extend = -0.5
+#alignments = pairwise2.align.globalds(refseq, q2, matrix, gap_open, gap_extend)
+#a1, a2, score, s, e = alignments[0]
+#print a1
+#print a2
+#files = sys.argv[2:]
+#infiles = files[:(len(files)//2)]
+#outfiles = files[(len(files)//2):]
+
+infiles = sys.argv[2:]
+
+#reffile = sys.argv[1]
+#modfile = sys.argv[2]
+
+aln_cache = dict()
+
+#for path, outpath in zip(infiles, outfiles):
+for path in infiles:
+	changecount = 0
+
+#	print(path)
+
+	struct = parser.get_structure(path, path)
+	
+	c2bestcids=dict()
+	c2c2seqid = dict()
+	c2c2aln = dict()
+	# preprocess to match chains
+	for chain in struct.get_chains():
+		seq = "".join([seq1(r.resname) for r in chain.get_residues() if r.get_id()[0]==" "])
+		c2seqid = dict()
+		c2aln = dict()
+		for refchain in chain2refseq.keys():
+			rseq = chain2refseq[refchain]
+			# reuse alignments already calculated
+			if (rseq,seq) in aln_cache:
+				alignments = aln_cache[(rseq,seq)]
+			else:
+				alignments = pairwise2.align.globalds(rseq, seq, matrix, gap_open, gap_extend, penalize_end_gaps=False)
+				aln_cache[(rseq,seq)] = alignments
+			aref, a, score, s, e = alignments[0]
+			seqid = sum((1. if r1==r2 else 0.) for r1, r2 in zip(aref, a))/len(aref)
+			c2seqid[refchain] = seqid
+			c2aln[refchain] = (aref, a)
+
+		bestcids = list(sorted(c2seqid.items(), key=lambda x: (-x[1], x[0]!=chain.get_id())))
+		# if chain ids match already, restrict the options
+	#	print("BESTCIDS FOR '%s': %s"%(chain.get_id(), str(bestcids)))
+		
+		if bestcids[0][0] == chain.get_id():
+			bestcids = bestcids[:1]
+	#	print("BESTCIDS FOR '%s': %s"%(chain.get_id(), str(bestcids)))
+		c2bestcids[chain.get_id()] = [x[0] for x in bestcids]
+		c2c2seqid[chain.get_id()] = c2seqid
+		c2c2aln[chain.get_id()] = c2aln
+	
+	c2newc = dict()
+	already_assigned_chains = set()
+	unknown_cids = set()
+	for cid, choices in sorted(list(c2bestcids.items()), key=lambda x:(len(x[1]), x[0])):
+		choices = [x for x in choices if x not in already_assigned_chains]
+	#	print("CHOICES", cid, choices)
+		try:
+			c2newc[cid] = choices[0]
+			already_assigned_chains.add(choices[0])
+		except Exception as e:
+			if should_keep_unknown_chains:
+				c2newc[cid] = cid
+				already_assigned_chains.add(cid)
+				unknown_cids.add(cid)
+				print("keeping unknown chain", cid, file=sys.stderr)
+			else:
+				raise e
+
+	#print(c2newc)
+	#for k,v in sorted(c2newc.items()):
+	#	print(k, "->", v)
+	
+	for chain in struct.get_chains():
+		if chain.get_id() in unknown_cids:
+			print("KEEP", refpath, path, chain.get_id().replace(" ","_"))
+			continue
+		#print("[info] current chain: %s" % chain.get_id())
+#		refseq = chain2refseq[chain.get_id()]
+
+		resiset = set((chain.get_id(), r.get_resname(), r.get_id()) for r in chain.get_residues() if r.get_id()[0]==" ")
+		if chain.get_id() not in chain2refresiset:
+			print("RAW", refpath, path, chain.get_id().replace(" ","_"), 0, len(resiset), 0, "%.2f" % 0., "%.2f" % 0.)
+		else:
+			refresiset = chain2refresiset[chain.get_id()]
+			common = refresiset&resiset
+			print("RAW", refpath, path, chain.get_id().replace(" ","_"), len(refresiset), len(resiset), len(common), "%.2f" % (len(common)/len(refresiset)), "%.2f" % (len(common)/len(resiset)))
+#		continue
+		#print(common)
+		#print(list(resiset)[:10])
+		#print(list(refresiset)[:10])
+
+		# increment all resi by 2,000,000 to prevent collisions
+#		for r in chain.get_residues():
+#			iii = r.get_id()
+#			iii = list(iii)
+#			iii[1] += 2000000
+#			iii = tuple(iii)
+#			r.id = iii
+	
+		seq = "".join([seq1(r.resname) for r in chain.get_residues() if r.get_id()[0]==" "])
+		#c2seqid = dict()
+		#c2aln = dict()
+		#for refchain in chain2refseq.keys():
+		#	rseq = chain2refseq[refchain]
+		#	alignments = pairwise2.align.globalds(rseq, seq, matrix, gap_open, gap_extend, penalize_end_gaps=False)
+		#	aref, a, score, s, e = alignments[0]
+		#	seqid = sum((1. if r1==r2 else 0.) for r1, r2 in zip(aref, a))/len(aref)
+		#	c2seqid[refchain] = seqid
+		#	c2aln[refchain] = (aref, a)
+
+		c2seqid = c2c2seqid[chain.get_id()]
+		c2aln = c2c2aln[chain.get_id()]
+
+		#bestcid = sorted(c2seqid.items(), key=lambda x: (-x[1], x[0]!=chain.get_id()))[0][0]
+		bestcid = c2newc[chain.get_id()] #sorted(c2seqid.items(), key=lambda x: (-x[1], x[0]!=chain.get_id()))[0][0]
+
+		refseq = chain2refseq[bestcid]
+
+		resiset = set((bestcid, r.get_resname(), r.get_id()) for r in chain.get_residues() if r.get_id()[0]==" ")
+		refresiset = chain2refresiset[bestcid]
+		common = refresiset&resiset
+		# mode refpath path mapping reflen thislen commonlen refseqid thisseqid 
+		print("MATCHED", refpath, path, "%s->%s" % (chain.get_id().replace(" ","_"), bestcid.replace(" ","_")), len(refresiset), len(resiset), len(common), "%.2f" % (len(common)/len(refresiset)), "%.2f" % (len(common)/len(resiset)), flush=True)
+		
+		refaln = c2aln[bestcid][0]
+		thisaln = c2aln[bestcid][1]
+		if should_print_aln:
+			# print seq alignment
+			print("ALN_REF %s" % (refaln))
+			print("ALN_IDT %s" % "".join( ("|" if a==b else " ") for a,b in zip(refaln, thisaln) ))
+			print("ALN_QRY %s" % (thisaln))
+		refresis = list(x.get_id() for x in chain2chain[bestcid].get_residues() if x.get_id()[0]==" ")
+		thisresis = list(x.get_id() for x in chain.get_residues() if x.get_id()[0]==" ")
+		
+		refresisq = list(reversed(refresis))
+		thisresisq = list(reversed(thisresis))
+
+		remap = dict()
+		detach_list = list()
+#		print("REF::", refaln, file=sys.stderr)
+#		print("THI::", thisaln, file=sys.stderr)
+		for refx, thisx in zip(refaln, thisaln):
+			ref_curresi = refresisq.pop() if refx.isalpha() else None
+			this_curresi = thisresisq.pop() if thisx.isalpha() else None
+
+			if ref_curresi == None:
+				#print("resi", this_curresi, "has no partner in ref", file=sys.stderr)
+				pass
+			elif this_curresi == None:
+				#print("ref resi", ref_curresi, "is missing in model", file=sys.stderr)
+				pass
+			elif should_delete_mismatched_residues and (thisx!=refx):
+				pass
+			else:
+				remap[this_curresi] = ref_curresi
+		
+		#print(remap, file=sys.stderr)
+		for r in chain.get_residues():
+			iii = r.get_id()
+			iii = list(iii)
+			iii[1] += 2000000
+			iii = tuple(iii)
+			r.id = iii
+		
+		for r in chain.get_residues():
+			iii = r.get_id()
+
+			realiii = list(iii)
+			realiii[1] -= 2000000
+			realiii = tuple(realiii)
+			
+			if realiii not in remap:
+				continue
+
+			newiii = remap[realiii]
+			#print("replacing", realiii, "with", newiii, file=sys.stderr)
+			r.id = newiii
+
+#		continue	
+#		char = "@"
+#		if "-" in aref:
+#			#char = "!"
+#			print ("[warning] alignment inserted gaps in reference sequence")
+#			warncount += 1
+#	
+#		print ("# %s" % ("".join([(str((x+1) % 10) if (((x+1) % 10) == 0) else " ") for x in range(len(aref))])))
+#		print ("# %s" % ("".join([str((x+1) % 10) for x in range(len(aref))])))
+#		print ("%s %s" % (char,  aref))
+#		print ("  %s" % (a))
+#	
+#		# renumber residues
+#		nums = []
+#		for i in range(len(a)):
+#			if a[i] != "-":
+#				nums.append(i+1)
+#	
+#		for i, res in zip(nums, chain.get_residues()):
+#			if res.get_id()[1] == i:
+#				continue
+#			res_id = list(res.get_id())
+#			new_res_id = res_id
+#			new_res_id[1] = i
+#			new_res_id = tuple(new_res_id)
+#	
+#			res.id = new_res_id
+#			changecount += 1
+	
+	if should_reassign_chains:
+		for chain in list(struct.get_chains()):
+			chain.id = "______" + chain.get_id()
+		for chain in list(struct.get_chains()):
+			curcid = chain.get_id()[6:]
+			chain.id = c2newc[curcid]
+
+	if should_set_occupancy_1:
+		for atom in struct.get_atoms():
+			atom.occupancy = 1.0
+	
+	if should_copy_bfactors:
+		for chain in struct[0]:
+			cid = chain.get_id()
+			if cid in unknown_cids:
+				print("skipping bfac for unknown chain", cid)
+				continue
+			print("copying bfac for chain", cid)
+			ref_chain = refstruct[0][cid]
+			for residue in chain:
+				if residue.get_id() not in ref_chain:
+					continue
+				ref_residue = ref_chain[residue.get_id()]
+				if "CA" in ref_residue:
+					ref_bfactor = ref_residue["CA"].bfactor
+				else:
+					for ref_atom in ref_residue:
+						ref_bfactor = ref_atom.bfactor
+						break
+				for atom in residue:
+					atom.bfactor = ref_bfactor
+	
+	if should_align_structure:
+		superimposer = Superimposer()
+
+	outpath = path + ".myrenum"	
+	# output new files
+	if os.path.exists(outpath):
+		print ("[error] file '%s' already exists" % (outpath), file=sys.stderr)
+		errorcount += 1
+	else:
+		pdbio.set_structure(struct)
+		pdbio.save(outpath, select=NotHugeResi(), preserve_atom_numbering=True)
+
+#	print ("[info] %d changes" % changecount)
+#
+#print ("")
+#print ("[info] %d warnings" % warncount, file=sys.stderr)
+#print ("[info] %d errors" % errorcount, file=sys.stderr)
+	
