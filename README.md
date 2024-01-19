@@ -69,6 +69,6 @@ python3 generate_mcrl_decoy_parallel_afm.py example_1AVO_assembly ABCDEFGHIJKLMN
 ```
 
 ## License
-**MIT License**
-Copyright (c) 2021 Tunde Aderinwale, Rashidedin Jahandideh, Daisuke Kihara, and Purdue University 
+The GNU General Public License v3.0 https://www.gnu.org/licenses/gpl-3.0.en.html
+Copyright (c) 2021-2023 Tunde Aderinwale, Rashidedin Jahandideh, Daisuke Kihara, and Purdue University 
 
